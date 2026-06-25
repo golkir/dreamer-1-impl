@@ -1,0 +1,34 @@
+[project]
+name = "dreamer"
+version = "0.1.0"
+description = "Dreamer"
+readme = "README.md"
+requires-python = "==3.14.*"
+
+dependencies = [
+    "pytest",
+    "pytest-asyncio",
+    "pydantic",
+    "pandas",
+    "python-dotenv",
+    "matplotlib",
+    "ipywidgets",
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
+    "einops>=0.8.2",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401"]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+    "ruff>=0.15.17",
+]
