@@ -1,101 +1,169 @@
+"""
+Usage:
+    accelerate launch main.py --env-name cartpole_balance --num-iterations 1000
+    accelerate launch main.py --env-backend gym --env-name Pendulum-v1 --mixed-precision fp16
+"""
+
+import argparse
+import os
+import random
+
+import numpy as np
 import torch
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torch.optim import AdamW
-from models.rssm import RSSM
-class Residual(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        return self.fn(x, **kwargs) + x
+from accelerate import Accelerator
+from torch.utils.tensorboard import SummaryWriter
+from tqdm.auto import tqdm
+from dreamer.config import DreamerConfig
+from dreamer.envs import make_dmc_env
+from dreamer.dreamer_alg import Dreamer
 
 
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
-"""
-Pass the observation through the CNN
-
-"""
-
-class RepresentationModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.cnn = CNN()
-
-    def forward(self, x):
-
-
-        pass
-
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env-name", type=str, default=None)
+    parser.add_argument("--env-backend", type=str, default=None, choices=["dmc", "gym"])
+    parser.add_argument("--num-iterations", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--mixed-precision", type=str, default=None, choices=["no", "fp16", "bf16"]
+    )
+    parser.add_argument(
+        "--resume", type=str, default=None, help="path to a checkpoint to resume from"
+    )
+    return parser.parse_args()
 
 
+def apply_overrides(config: DreamerConfig, args: argparse.Namespace) -> DreamerConfig:
+    if args.env_name is not None:
+        config.environment.env_name = args.env_name
+    if args.env_backend is not None:
+        config.env_backend = args.env_backend
+    if args.num_iterations is not None:
+        config.num_iterations = args.num_iterations
+    if args.seed is not None:
+        config.seed = args.seed
+    if args.mixed_precision is not None:
+        config.mixed_precision = args.mixed_precision
+    return config
 
 
-
-class Dreamer:
-    def __init__(self, state_size):
-        self.reward_hidden_size = 30 # hidden size of the reward network.
-        self.reward_net = MLP(state_size, 1, 2,  )
-
-
-
-class SequenceDataset(Dataset):
-    def __init__(self, observations, actions, rewards):
-        self.obs = observations
-        self.actions = actions
-        self.rewards = rewards
-
-    def __len__(self):
-        return self.obs.shape[0]  # S
-
-    def __getitem__(self, idx):
-        return {
-            "observations": self.obs[idx],  # (T, C, H, W)
-            "actions": self.actions[idx],  # (T, A)
-            "rewards": self.rewards[idx],  # (T, 1)
-        }
-
-
-def train():
-    # sequence includes {action, observation, reward} for each timestep t
-
-    # total observations (Sequences, T, C, H, W)
-    S = 100
-    T = 20
-    W = 100
-    H = 100
-    C = 3
-    actions_dim = 30
-    low = -1
-    high = 1
-    observations = torch.rand((S, T, C, H, W))
-    actions = low + (high - low) * torch.rand((S, T, actions_dim))
-    rewards = torch.rand((S, T, 1)) - 1
-
-    dataset = SequenceDataset(observations, actions, rewards)
-    loader = DataLoader(
-        dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True
+def save_checkpoint(dreamer: Dreamer, iteration: int, path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(
+        {
+            "iteration": iteration,
+            "model_state": dreamer.state_dict(),
+            "world_optimizer": dreamer.world_optimizer.state_dict(),
+            "actor_optimizer": dreamer.actor_optimizer.state_dict(),
+            "critic_optimizer": dreamer.critic_optimizer.state_dict(),
+        },
+        path,
     )
 
-    for batch in loader:
-        obs, actions, rewards = batch
 
-        # loss = model(obs, actions, rewards)
-        # loss.backward()
-        # optimizer.step()
-        # optimizer.zero_grad()
+def load_checkpoint(dreamer: Dreamer, path: str, map_location="cpu") -> int:
+    ckpt = torch.load(path, map_location=map_location)
+    dreamer.load_state_dict(ckpt["model_state"])
+    dreamer.world_optimizer.load_state_dict(ckpt["world_optimizer"])
+    dreamer.actor_optimizer.load_state_dict(ckpt["actor_optimizer"])
+    dreamer.critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
+    return ckpt["iteration"]
 
+
+def main() -> None:
+    args = parse_args()
+    config = DreamerConfig()
+    set_seed(config.seed)
+
+    accelerator = Accelerator(mixed_precision=config.mixed_precision)
+    device = accelerator.device
+    env_config = config.environment
+
+    env = make_dmc_env(
+        env_config.domain_name,
+        env_config.task_name,
+        env_config.seed,
+        env_config.visualize_reward,
+        env_config.from_pixels,
+        env_config.height,
+        env_config.width,
+        env_config.frame_skip,
+        env_config.pixel_norm,
+    )
+
+    dreamer = Dreamer(config)
+
+    # Accelerate handles device placement (and, on multi-GPU, distribution)
+    # for the model and all three optimizers used inside Dreamer.
+    (
+        dreamer,
+        dreamer.world_optimizer,
+        dreamer.actor_optimizer,
+        dreamer.critic_optimizer,
+    ) = accelerator.prepare(
+        dreamer,
+        dreamer.world_optimizer,
+        dreamer.actor_optimizer,
+        dreamer.critic_optimizer,
+    )
+
+    start_iteration = 0
+    if args.resume:
+        start_iteration = load_checkpoint(dreamer, args.resume, map_location=device)
+
+    writer = SummaryWriter(config.log_dir) if accelerator.is_main_process else None
+
+    progress = tqdm(
+        range(start_iteration, config.num_iterations),
+        desc="Training",
+        dynamic_ncols=True,
+    )
+
+    if len(dreamer.buffer) < 1:
+        dreamer.environment_interaction(env, config.seed_episodes)
+
+    for iteration in progress:
+        data = dreamer.buffer.sample(config.batch_size, config.seq_length)
+        posteriors, h, world_stats = dreamer.learn_dynamics(data)
+        traj, behavior_stats = dreamer.learn_behavior(posteriors, h)
+
+        progress.set_postfix(
+            world=f"{world_stats['world_loss']:.2f}",
+            recon=f"{world_stats['reconstruction_loss']:.2f}",
+            kl=f"{world_stats['kl_loss']:.3f}",
+            actor=f"{behavior_stats['actor_loss']:.2f}",
+            critic=f"{behavior_stats['critic_loss']:.2f}",
+            replay=len(dreamer.buffer),
+            episodes=dreamer.num_total_episode,
+        )
+
+        dreamer.environment_interaction(env, config.num_interaction_episodes)
+
+        if writer is not None and iteration % 10 == 0:
+            writer.add_scalar(
+                "train/episode_count", dreamer.num_total_episode, iteration
+            )
+
+        if iteration % config.eval_every == 0:
+            dreamer.evaluate(env)
+
+        if accelerator.is_main_process and iteration % config.checkpoint_every == 0:
+            save_checkpoint(
+                accelerator.unwrap_model(dreamer),
+                iteration,
+                os.path.join(config.checkpoint_dir, f"dreamer_{iteration}.pt"),
+            )
+
+    if writer is not None:
+        writer.close()
 
 
 if __name__ == "__main__":
-
-    dims = [10, 20, 30, 40, 50, 1]
-
-    # [(10, 20), (20, 30), (30, 40), (40, 50), (50, 1)]
-
-    print(list(zip(dims[:-1], dims[1:])))
-
-    train()
+    main()

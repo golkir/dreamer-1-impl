@@ -3,19 +3,24 @@ name = "dreamer"
 version = "0.1.0"
 description = "Dreamer"
 readme = "README.md"
-requires-python = "==3.14.*"
+requires-python = "==3.12.*"
 
 dependencies = [
+    "accelerate",
+    "gymnasium",
+    "numpy>1.21.6",
     "pytest",
     "pytest-asyncio",
-    "pydantic",
-    "pandas",
     "python-dotenv",
     "matplotlib",
     "ipywidgets",
-    "torch>=2.12.0",
-    "torchvision>=0.27.0",
-    "einops>=0.8.2",
+    "torch",
+    "torchvision",
+    "einops",
+    "tensorboard",
+    "opencv-python>=4.10",
+    "dm_control",
+    "tqdm>=4.68.3",
 ]
 
 [tool.setuptools]
@@ -26,6 +31,7 @@ where = ["src"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F401"]
+
 
 [dependency-groups]
 dev = [
