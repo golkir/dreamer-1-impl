@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from dreamer.config import DreamerConfig
-
+from dreamer.utils import create_normal_dist_from_params
 
 class Decoder(nn.Module):
     """
@@ -74,12 +74,16 @@ class Decoder(nn.Module):
         x = x.view(-1, self.init_channels, 1, 1)
         x = self.decoder(x)
         x = self.output_resize(x)
-        return x.view(*leading_shape, *self.obs_shape)
+        print(x.shape, "Before view")
+        x = x.view(*leading_shape, *self.obs_shape)
+        print(x.shape, "after view")
+        dist = create_normal_dist_from_params(x, std=1, event_shape=len(self.config.observation_shape))
+        return dist 
 
 
 if __name__ == "__main__":
     from dataclasses import dataclass
-
+    
     @dataclass
     class Config:
         input_shape: tuple

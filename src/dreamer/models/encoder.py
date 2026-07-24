@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from einops import rearrange
 from dreamer.config import DreamerConfig
 
 
@@ -19,8 +20,8 @@ class ObservationEncoder(nn.Module):
                 nn.Conv2d(
                     curr_in_channels,
                     out_channels,
-                    kernel_size=self.config.encoder.kernel_sizes[multiplier-1],
-                    stride=self.config.encoder.strides[multiplier-1],
+                    kernel_size=self.config.encoder.kernel_sizes[multiplier - 1],
+                    stride=self.config.encoder.strides[multiplier - 1],
                 )
             )
             layers.append(activation())
@@ -28,7 +29,9 @@ class ObservationEncoder(nn.Module):
 
         self.cnn = nn.Sequential(*layers)
 
-        input_shape = getattr(self.config, "observation_shape", (input_channels, 64, 64))
+        input_shape = getattr(
+            self.config, "observation_shape", (input_channels, 64, 64)
+        )
 
         fc_input_dim = self._get_conv_output_dim(input_shape)
 
@@ -42,10 +45,13 @@ class ObservationEncoder(nn.Module):
             return int(torch.numel(dummy_output))
 
     def forward(self, x):
-        # x: (B, C, H, W)
+        # (B, S, 3, H, W)
+        B, S = x.shape[:2]
+        x = rearrange(x, "b s c h w -> (b s) c h w")
         x = self.cnn(x)
         x = x.flatten(start_dim=1)
         x = self.fc(x)
+        x = rearrange(x, "(b s) d -> b s d", b=B, s=S)
         return x
 
 

@@ -18,6 +18,7 @@ from dreamer.models.mlp import MLP
 from dreamer.replay_buffer import ReplayBuffer
 from dataclasses import dataclass, fields, field
 from dreamer.config import DreamerConfig, RSSMTrajectory, ImaginationTrajectory
+from dreamer.utils import create_normal_dist_from_params
 
 
 def preprocess_obs(obs, device):
@@ -27,13 +28,14 @@ def preprocess_obs(obs, device):
     obs = obs.float()
 
     if obs.ndim == 3:
-        obs = obs.unsqueeze(0)
+        obs = obs.unsqueeze(0).unsqueeze(0)
 
     return obs.to(device)
 
 
-class Dreamer:
+class Dreamer(nn.Module):
     def __init__(self, config: DreamerConfig):
+        super().__init__()
         self.config = config
         self.device = config.device
 
@@ -49,7 +51,7 @@ class Dreamer:
         self.decoder = Decoder(
             latent_dim=config.rssm.h_dim + config.rssm.z_dim, config=config
         )
-        self.reward_model = RewardModel(config.rssm.z_dim)
+        self.reward_model = RewardModel(config.rssm.z_dim + config.rssm.h_dim)
         self.actor = Actor(config)
         self.critic = Critic(config)
         self.dynamic_trajectory = RSSMTrajectory()
@@ -78,7 +80,7 @@ class Dreamer:
 
         self.num_total_episode = 0
 
-    def learn_dynamics(self, data ):
+    def learn_dynamics(self, data):
         """
         Learn world model via learning representation and transition model
 
@@ -86,8 +88,8 @@ class Dreamer:
             data: batch that includes observation, action, and reward
         """
         B = self.config.batch_size
-        obs_embed = self.encoder(data.observation)
-        prior, h = self.rssm.state_init()
+        obs_embed = self.encoder(data.observation)  # B, S, Obs_emb_dim
+        prior, h = self.rssm.state_init(self.config.batch_size)
 
         for t in range(1, self.config.seq_length):
             h = self.rssm.recurrent(prior, data.action[:, t - 1], h)
@@ -96,10 +98,10 @@ class Dreamer:
             self.dynamic_trajectory.append(
                 prior=prior,
                 prior_mean=prior_dist.mean,
-                prior_std=prior_dist.std,
+                prior_std=prior_dist.stddev,
                 posterior=posterior_sample,
                 posterior_mean=posterior_dist.mean,
-                posterior_std=posterior_dist.std,
+                posterior_std=posterior_dist.stddev,
                 h=h,
             )
 
@@ -107,7 +109,7 @@ class Dreamer:
 
         traj = self.dynamic_trajectory.stack_fields()
         losses = self.optimize_world_model(data, traj)
-        return traj.posteriors.detach(), traj.h.detach(), losses
+        return traj.posterior.detach(), traj.h.detach(), losses
 
     def learn_behavior(
         self, zs: torch.Tensor, hs: torch.Tensor
@@ -117,9 +119,8 @@ class Dreamer:
         """
         ss = rearrange(zs, "b l s -> (b l) s")  # (B*L, s_dim)
         hh = rearrange(hs, "b l h -> (b l) h")  # (B*L, h_dim)
-
         for _ in range(self.config.horizon):
-            action = self.actor(hh, ss)
+            action_dist, action = self.actor(hh, ss)
             hh = self.rssm.recurrent(ss, action, hh)
             ss, _ = self.rssm.transition(hh)
             self.imagination_trajectory.append(prior=ss, h=hh)
@@ -131,14 +132,21 @@ class Dreamer:
         return traj, losses
 
     def optimize_world_model(self, data, trajectory: RSSMTrajectory):
-
+        
         decoded_obs_dist = self.decoder(trajectory.h, trajectory.prior)
         reward_dist = self.reward_model(trajectory.h, trajectory.posterior)
 
         reward_loss = reward_dist.log_prob(data.reward[:, 1:])  # log likelihood
 
+        prior_dist = create_normal_dist_from_params(
+            trajectory.prior_mean, trajectory.prior_std, event_shape=1
+        )
+        posterior_dist = create_normal_dist_from_params(
+            trajectory.posterior_mean, trajectory.posterior_std, event_shape=1
+        )
+
         kl_divergence_loss = torch.mean(
-            torch.distributions.kl.kl_divergence(trajectory.posterior, trajectory.prior)
+            torch.distributions.kl.kl_divergence(prior_dist, posterior_dist)
         )
         kl_divergence_loss = torch.max(
             torch.tensor(self.config.free_nats).to(self.device), kl_divergence_loss
@@ -147,9 +155,10 @@ class Dreamer:
             data.observation[:, 1:]
         )
         world_model_loss = (
-            kl_divergence_loss - reconstruction_observation_loss - reward_loss
+            kl_divergence_loss
+            - reconstruction_observation_loss.mean()
+            - reward_loss.mean()
         )
-
         self.world_optimizer.zero_grad()
         world_model_loss.backward()
         self.world_optimizer.step()
@@ -163,7 +172,10 @@ class Dreamer:
 
     def optimize_behavior(self, traj: ImaginationTrajectory):
 
-        reward_pred = self.reward_model(traj.prior, traj.h).mean
+        reward_pred = self.reward_model(traj.h, traj.prior).mean
+
+        print(traj.h.shape, "Traj h shape")
+        print(traj.prior.shape, "Prior")
 
         values = self.critic(traj.h, traj.prior).mean
         lambda_values = self.critic.compute_lambda_return(
@@ -181,7 +193,7 @@ class Dreamer:
             traj.h.detach()[:, :-1],
         )
 
-        critic_loss = -torch.mean(value_dist.log_prob(lambda_values.detach()))
+        critic_loss = -torch.mean(value_dist.log_prob(lambda_values[:, :-1].detach()))
         self.critic_optimizer.zero_grad()
 
         critic_loss.backward()

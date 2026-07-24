@@ -46,7 +46,7 @@ class RSSM(nn.Module):
         compute prior stochastic state of the transition model
         q(s_t| s_t-1)
         """
-        x = self.transition_mlp(
+        x = self.prior_mlp(
             h
         )  # (B, s_dim * 2) # mu and sigma parameters of the normal distribution
         prior_dist = create_normal_dist_from_output(x)
@@ -73,7 +73,7 @@ class RSSM(nn.Module):
         q(z_t | h_t)
         """
 
-        prior, prior_dist = self.encode.prior(ht)
+        prior, prior_dist = self.encoder_prior(ht)
         return prior, prior_dist
     
     def state_init(self, B):
