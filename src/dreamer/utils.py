@@ -33,3 +33,27 @@ def create_normal_dist_from_params(
         dist = torch.distributions.Independent(dist, event_shape)
 
     return dist
+
+
+# def create_normal_dist(
+#     x,
+#     std=None,
+#     mean_scale=1,
+#     init_std=0,
+#     min_std=0.1,
+#     activation=None,
+#     event_shape=None,
+# ):
+#     if std == None:
+#         mean, std = torch.chunk(x, 2, -1)
+#         mean = mean / mean_scale
+#         if activation:
+#             mean = activation(mean)
+#         mean = mean_scale * mean
+#         std = F.softplus(std + init_std) + min_std
+#     else:
+#         mean = x
+#     dist = torch.distributions.Normal(mean, std)
+#     if event_shape:
+#         dist = torch.distributions.Independent(dist, event_shape)
+#     return dist

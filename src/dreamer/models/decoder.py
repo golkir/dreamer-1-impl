@@ -6,17 +6,18 @@ from dreamer.utils import create_normal_dist_from_params
 
 class Decoder(nn.Module):
     """
-    Decode RSSM latent state (h, z) back into an RGB observation.
+    Decode RSSM latent state (h, z) back into an RGB observation but with a catch that we 
+    return distribution
     """
 
-    def __init__(self, latent_dim: int, config: DreamerConfig):
+    def __init__(self, config: DreamerConfig):
         super().__init__()
 
         self.config = config
         decoder_cfg = config.decoder
 
         self.depth = decoder_cfg.depth
-        activation = getattr(nn, decoder_cfg.activation)
+        activation = getattr(nn, decoder_cfg.activation) # default:ReLU
 
         self.obs_shape = (
             decoder_cfg.obs_channels,
@@ -24,9 +25,9 @@ class Decoder(nn.Module):
             decoder_cfg.obs_width,
         )
 
-        self.init_channels = self.depth * 32
+        self.init_channels = self.depth * 32 # default: 1024
 
-        self.fc = nn.Linear(latent_dim, self.init_channels)
+        self.fc = nn.Linear(config.rssm.h_dim + config.rssm.z_dim, self.init_channels)
 
         channels = [
             self.init_channels,
@@ -53,31 +54,25 @@ class Decoder(nn.Module):
 
         self.decoder = nn.Sequential(*layers)
 
-        # Guarantees the requested output size
-        self.output_resize = nn.AdaptiveAvgPool2d(
-            (decoder_cfg.obs_height, decoder_cfg.obs_width)
-        )
 
     def forward(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """
         h: (..., h_dim)
         z: (..., z_dim)
-
-        returns:
-            (..., C, H, W)
         """
 
         leading_shape = h.shape[:-1]
         x = torch.cat([h, z], dim=-1)
-        x = x.reshape(-1, x.shape[-1])
         x = self.fc(x)
-        x = x.view(-1, self.init_channels, 1, 1)
+        """
+        merge B and L (batch and seq length), and expand into (B * L, 1024, 1, 1) where we interpret output vector of linear layer
+        as the N feature maps with size 1 X 1. ConvTranspose2D accepts N, C, H, W so 1,1 becomes initial H, W we are decoding from
+        
+        """
+        x = x.view(-1, self.init_channels, 1, 1) 
         x = self.decoder(x)
-        x = self.output_resize(x)
-        print(x.shape, "Before view")
         x = x.view(*leading_shape, *self.obs_shape)
-        print(x.shape, "after view")
-        dist = create_normal_dist_from_params(x, std=1, event_shape=len(self.config.observation_shape))
+        dist = create_normal_dist_from_params(x, std=1, event_shape=len(self.config.observation_shape) ) 
         return dist 
 
 

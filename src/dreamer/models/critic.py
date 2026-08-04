@@ -4,12 +4,11 @@ import torch.functional as F
 from dreamer.models.mlp import MLP
 from dreamer.config import DreamerConfig
 
-from dreamer.utils import create_normal_dist_from_output, create_normal_dist_from_params
+from dreamer.utils import create_normal_dist_from_params
 
 """
 Loss: min E[Sum(v_model(s_r) - V(s_r)^2)]
 """
-
 
 class Critic(nn.Module):
     """
@@ -22,15 +21,12 @@ class Critic(nn.Module):
         self.z_dim = config.rssm.z_dim
         self.mlp = MLP(self.h_dim + self.z_dim, 1)
 
-    def compute_lambda_return(self, rewards, values, gamma=0.99, lam=0.95):
+    def compute_lambda_return(self, rewards, values, continues, lam=0.95):
 
         """
         V_k = Sum(rewards_k_to_n) + lambda * v()
         
         """
-
-        print(rewards.shape, "Rewards")
-        print(values.shape, "Values")
 
         H = rewards.shape[1] - 1
 
@@ -39,7 +35,7 @@ class Critic(nn.Module):
         ret = values[:, -1]
 
         for t in reversed(range(H)):
-            ret = rewards[:, t] + gamma * ((1.0 - lam) * values[:, t + 1] + lam * ret)
+            ret = rewards[:, t] + continues[:,t] * ((1.0 - lam) * values[:, t + 1] + lam * ret)
             returns[:, t] = ret
 
         return returns

@@ -15,6 +15,7 @@ from dreamer.models.actor import Actor
 from dreamer.models.reward import RewardModel
 from dreamer.models.critic import Critic
 from dreamer.models.mlp import MLP
+from dreamer.models.continue_model import ContinueModel
 from dreamer.replay_buffer import ReplayBuffer
 from dataclasses import dataclass, fields, field
 from dreamer.config import DreamerConfig, RSSMTrajectory, ImaginationTrajectory
@@ -48,14 +49,14 @@ class Dreamer(nn.Module):
 
         self.rssm = RSSM(config.action_dim, config)
         self.encoder = ObservationEncoder(3, config)
-        self.decoder = Decoder(
-            latent_dim=config.rssm.h_dim + config.rssm.z_dim, config=config
-        )
+        self.decoder = Decoder(config=config)
         self.reward_model = RewardModel(config.rssm.z_dim + config.rssm.h_dim)
         self.actor = Actor(config)
         self.critic = Critic(config)
+        self.continue_model = ContinueModel(config)
         self.dynamic_trajectory = RSSMTrajectory()
         self.imagination_trajectory = ImaginationTrajectory()
+        self.continue_loss_func = nn.BCELoss()
 
         params = list(
             itertools.chain(
@@ -63,16 +64,15 @@ class Dreamer(nn.Module):
                 self.reward_model.parameters(),
                 self.decoder.parameters(),
                 self.encoder.parameters(),
+                self.continue_model.parameters(),
             )
         )
 
-        print("before adam")
         self.world_optimizer = optim.Adam(
             params,
             lr=config.world_lr,
         )
 
-        print("after adam")
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=config.actor_lr)
         self.critic_optimizer = optim.Adam(
             self.critic.parameters(), lr=config.critic_lr
@@ -109,7 +109,11 @@ class Dreamer(nn.Module):
 
         traj = self.dynamic_trajectory.stack_fields()
         losses = self.optimize_world_model(data, traj)
-        return traj.posterior.detach(), traj.h.detach(), losses
+        return (
+            traj.posterior.detach(),
+            traj.h.detach(),
+            losses,
+        )  # why detached are returned here
 
     def learn_behavior(
         self, zs: torch.Tensor, hs: torch.Tensor
@@ -132,11 +136,24 @@ class Dreamer(nn.Module):
         return traj, losses
 
     def optimize_world_model(self, data, trajectory: RSSMTrajectory):
-        
-        decoded_obs_dist = self.decoder(trajectory.h, trajectory.prior)
+
+        decoded_obs_dist = self.decoder(
+            trajectory.h, trajectory.posterior
+        )  # takes posterior and h
+        reconstruction_observation_loss = decoded_obs_dist.log_prob(
+            data.observation[:, 1:]
+        )
+
+        continue_dist = self.continue_model(trajectory.posterior, trajectory.h)
+        continue_loss = self.continue_loss_func(
+            continue_dist.probs, 1 - data.done[:, 1:]
+        )  # data.done will be undefined
+
         reward_dist = self.reward_model(trajectory.h, trajectory.posterior)
 
-        reward_loss = reward_dist.log_prob(data.reward[:, 1:])  # log likelihood
+        reward_loss = reward_dist.log_prob(
+            data.reward[:, 1:]
+        )  # log likelihood ; why from 1:
 
         prior_dist = create_normal_dist_from_params(
             trajectory.prior_mean, trajectory.prior_std, event_shape=1
@@ -151,16 +168,20 @@ class Dreamer(nn.Module):
         kl_divergence_loss = torch.max(
             torch.tensor(self.config.free_nats).to(self.device), kl_divergence_loss
         )
-        reconstruction_observation_loss = decoded_obs_dist.log_prob(
-            data.observation[:, 1:]
-        )
+
         world_model_loss = (
             kl_divergence_loss
             - reconstruction_observation_loss.mean()
             - reward_loss.mean()
+            + continue_loss.mean()
         )
         self.world_optimizer.zero_grad()
         world_model_loss.backward()
+        nn.utils.clip_grad_norm_(
+            self.parameters,
+            self.config.grad_clip,
+            norm_type=self.config.grad_norm_type,
+        )
         self.world_optimizer.step()
 
         return {
@@ -174,12 +195,11 @@ class Dreamer(nn.Module):
 
         reward_pred = self.reward_model(traj.h, traj.prior).mean
 
-        print(traj.h.shape, "Traj h shape")
-        print(traj.prior.shape, "Prior")
-
         values = self.critic(traj.h, traj.prior).mean
+        continues = self.continue_model(traj.priors, traj.h).mean
+
         lambda_values = self.critic.compute_lambda_return(
-            reward_pred, values
+            reward_pred, values, continues
         )  # this function should be checked
 
         actor_loss = self.actor.actor_loss(lambda_values)

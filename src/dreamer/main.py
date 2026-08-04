@@ -81,9 +81,7 @@ def main() -> None:
     args = parse_args()
     config = DreamerConfig()
     set_seed(config.seed)
-
-    accelerator = Accelerator(mixed_precision=config.mixed_precision)
-    device = accelerator.device
+    device = config.device
     env_config = config.environment
 
     env = make_dmc_env(
@@ -100,25 +98,11 @@ def main() -> None:
 
     dreamer = Dreamer(config)
 
-    # Accelerate handles device placement (and, on multi-GPU, distribution)
-    # for the model and all three optimizers used inside Dreamer.
-    (
-        dreamer,
-        dreamer.world_optimizer,
-        dreamer.actor_optimizer,
-        dreamer.critic_optimizer,
-    ) = accelerator.prepare(
-        dreamer,
-        dreamer.world_optimizer,
-        dreamer.actor_optimizer,
-        dreamer.critic_optimizer,
-    )
-
     start_iteration = 0
     if args.resume:
         start_iteration = load_checkpoint(dreamer, args.resume, map_location=device)
 
-    writer = SummaryWriter(config.log_dir) if accelerator.is_main_process else None
+    writer = SummaryWriter(config.log_dir)
 
     progress = tqdm(
         range(start_iteration, config.num_iterations),
@@ -154,9 +138,9 @@ def main() -> None:
         if iteration % config.eval_every == 0:
             dreamer.evaluate(env)
 
-        if accelerator.is_main_process and iteration % config.checkpoint_every == 0:
+        if iteration % config.checkpoint_every == 0:
             save_checkpoint(
-                accelerator.unwrap_model(dreamer),
+                dreamer,
                 iteration,
                 os.path.join(config.checkpoint_dir, f"dreamer_{iteration}.pt"),
             )

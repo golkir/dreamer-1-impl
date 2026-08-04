@@ -14,11 +14,6 @@ class Actor(nn.Module):
     the output should be:
     actions are vector valued, each action in the vector is Gaussian output by dense neural net passed through
     the tanh function.
-
-    Input: sr_dim - let's say B, L, H
-    We want B, L, A, 2, we can use rearrange to achieve this
-
-    Shape:
     """
 
     def __init__(self, config: DreamerConfig):
@@ -40,6 +35,7 @@ class Actor(nn.Module):
         x = torch.cat([h_r, z_r], -1)
         x = self.mlp(x)
 
+        # assuming action is continuous, when discrete different logic
         dist = create_normal_dist_from_output(x, activation=torch.tanh)
 
         dist = torch.distributions.TransformedDistribution(dist, TanhTransform())

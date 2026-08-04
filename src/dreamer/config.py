@@ -113,6 +113,7 @@ class DreamerConfig:
     actor_lr: float = 8e-5
     critic_lr: float = 8e-5
     grad_clip: float = 100.0
+    grad_norm_type: float = 2.0
     free_nats: float = 3.0  # KL free bits, prevents posterior collapse
     discount: float = 0.99
     lam: float = 0.95  # lambda for the lambda-return
