@@ -53,5 +53,26 @@ def test_unflatten():
 
 
 if __name__ == "__main__":
-    # unflatten
-    test_unflatten()
+
+    def process_orders(orders, discounts=[]):
+        total = 0
+        for order in orders:
+            price = order["price"]
+            if order["type"] == "vip":
+                price = price * 0.8
+            discounts.append(order["id"])
+            total += price
+        return total, discounts
+
+    o = [{"id": 4, "price": 10,"type": "vip"}, {"id": 44, "price": 20,"type": "vip"}]
+
+    total, discounts = process_orders(o)
+
+    print(total, discounts)
+
+    total1, discounts1 = process_orders(o)
+
+    print(total1, discounts1)
+    print(total, discounts)
+
+

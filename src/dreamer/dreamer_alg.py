@@ -240,8 +240,6 @@ class Dreamer(nn.Module):
                 preprocess_obs(observation, self.device)
             )
 
-            print(embedded_observation.shape, "emb shae")
-
             score = 0.0
             done = False
 

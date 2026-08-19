@@ -21,6 +21,7 @@ dependencies = [
     "opencv-python>=4.10",
     "dm_control",
     "tqdm>=4.68.3",
+    "plotly>=6.9.0",
 ]
 
 [tool.setuptools]
