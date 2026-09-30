@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"episode {episode}: return {total:.1f}", flush=True)
         if args.video and episode == 0:
             write_video(args.video, frames)
+    env.close()
     print(
         f"mean return {np.mean(returns):.1f} +- {np.std(returns):.1f} over {len(returns)} episodes"
     )

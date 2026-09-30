@@ -21,7 +21,7 @@ from dreamer.config import EnvConfig
 from dreamer.wrappers import ActionRepeat, ChannelsFirst, PixelObservation, TimeLimit
 
 # Headless rendering for MuJoCo; must be set before dm_control is imported.
-# Override with MUJOCO_GL=osmesa if EGL is unavailable.
+# Use MUJOCO_GL=osmesa (CPU rendering) where GPU EGL is unavailable, e.g. on Kaggle.
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 
@@ -40,6 +40,11 @@ class DMCEnv(gym.Env):
         grayscale: bool = False,
         seed: int | None = None,
     ):
+        if os.environ["MUJOCO_GL"] == "osmesa":
+            # OSMesa's software renderer and Triton (loaded lazily by torch, e.g. when an
+            # optimizer is created) each bundle their own LLVM. Loading Triton after
+            # OSMesa crashes the process with "free(): invalid pointer", so load it first.
+            import torch._dynamo  # noqa: F401
         from dm_control import suite
 
         self._env = suite.load(domain, task, task_kwargs={"random": seed})
@@ -66,6 +71,11 @@ class DMCEnv(gym.Env):
             frame = (frame @ np.array([0.299, 0.587, 0.114]))[..., None]
             frame = frame.astype(np.uint8)
         return np.ascontiguousarray(frame.transpose(2, 0, 1))
+
+    def close(self):
+        # Free the rendering contexts now; otherwise dm_control tries at interpreter
+        # exit after its render thread is gone and prints "Exception ignored" errors.
+        self._env.physics.free()
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
