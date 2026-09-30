@@ -23,15 +23,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
+import types
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
+import cv2
 import gymnasium as gym
 import numpy as np
 import torch
-from torch.utils.tensorboard import SummaryWriter
 
 from dreamer.config import PRESETS, Config, EnvConfig, make_config, parse_overrides, set_field
 from dreamer.dreamer_alg import Dreamer
@@ -43,10 +45,21 @@ EnvFn = Callable[[EnvConfig, int], gym.Env]
 
 
 class Logger:
-    """Averages scalars between writes; logs to TensorBoard, JSONL and stdout."""
+    """Averages scalars between writes; logs to JSONL, stdout, PNG files and
+    (optionally) TensorBoard."""
 
-    def __init__(self, logdir: Path):
-        self.writer = SummaryWriter(str(logdir))
+    def __init__(self, logdir: Path, tensorboard: bool = True):
+        self.logdir = logdir
+        self.writer = None
+        if tensorboard:
+            # If TensorFlow is installed (e.g. on Kaggle), TensorBoard imports it, and it
+            # drags in Keras, JAX, etc. whose bundled LLVM makes MuJoCo's OpenGL context
+            # creation segfault. The "notf" marker makes TensorBoard use its built-in TF
+            # stub instead, which is all SummaryWriter needs.
+            sys.modules.setdefault("tensorboard.compat.notf", types.ModuleType("notf"))
+            from torch.utils.tensorboard import SummaryWriter
+
+            self.writer = SummaryWriter(str(logdir))
         self.jsonl = open(logdir / "metrics.jsonl", "a")
         self.scalars: dict[str, list[float]] = defaultdict(list)
 
@@ -54,14 +67,21 @@ class Logger:
         self.scalars[name].append(float(value))
 
     def image(self, name: str, image: torch.Tensor, step: int) -> None:
-        self.writer.add_image(name, image, step)
+        """Save a (C, H, W) image in [0, 1] as PNG, and to TensorBoard if enabled."""
+        if self.writer is not None:
+            self.writer.add_image(name, image, step)
+        path = self.logdir / name / f"{step:09d}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pixels = (image.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        cv2.imwrite(str(path), pixels if pixels.shape[-1] == 1 else pixels[..., ::-1])
 
     def write(self, step: int) -> None:
         means = {k: float(np.mean(v)) for k, v in self.scalars.items() if v}
         self.scalars.clear()
-        for name, value in means.items():
-            self.writer.add_scalar(name, value, step)
-        self.writer.flush()
+        if self.writer is not None:
+            for name, value in means.items():
+                self.writer.add_scalar(name, value, step)
+            self.writer.flush()
         self.jsonl.write(json.dumps({"step": step, **means}) + "\n")
         self.jsonl.flush()
         labels = {
@@ -76,7 +96,8 @@ class Logger:
         print(f"[{step:>9}] " + "  ".join(f"{k} {v:.3g}" for k, v in shown.items()), flush=True)
 
     def close(self) -> None:
-        self.writer.close()
+        if self.writer is not None:
+            self.writer.close()
         self.jsonl.close()
 
 
@@ -189,7 +210,7 @@ def train(config: Config, resume: bool = False, env_fn: EnvFn = make_env) -> dic
     capacity = min(t.buffer_capacity, max_steps)
     buffer = ReplayBuffer(obs_shape, agent.action_dim, capacity, seed=r.seed)
     collector = Collector(env, buffer, agent, config.env.action_repeat)
-    logger = Logger(logdir)
+    logger = Logger(logdir, tensorboard=r.tensorboard)
     print(
         f"Parameters: {sum(p.numel() for p in agent.parameters()) / 1e6:.2f}M  "
         f"replay: {capacity} steps (up to {capacity * np.prod(obs_shape) / 2**30:.1f} GiB)",

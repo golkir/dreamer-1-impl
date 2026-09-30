@@ -113,6 +113,7 @@ class RunConfig:
     eval_every: int = 10_000
     eval_episodes: int = 5
     video_every: int = 20_000  # open-loop prediction images; 0 disables
+    tensorboard: bool = True  # metrics.jsonl and PNG images are always written
     checkpoint_every: int = 50_000
     save_replay: bool = False  # store the replay buffer next to latest.pt (large!)
 

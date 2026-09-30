@@ -46,8 +46,13 @@ uv run dreamer-eval runs/dmc_walker_walk_s0 --episodes 10 --video walker.mp4
   driver, e.g. `uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128`.
   Note that `uv sync` will switch back to the locked version.
 - DMC renders headless with `MUJOCO_GL=egl` (the default here). If EGL is missing, use
-  `MUJOCO_GL=osmesa` (needs `libosmesa6`).
+  `MUJOCO_GL=osmesa` with `PYOPENGL_PLATFORM=osmesa` (needs `libosmesa6`).
 - The device is picked automatically (`cuda` > `mps` > `cpu`); force it with `--device cuda:1`.
+- Environments with TensorFlow installed (e.g. Kaggle): importing TensorFlow loads Keras/JAX,
+  whose bundled LLVM makes MuJoCo's first render segfault. The logger therefore forces
+  TensorBoard's TensorFlow-free mode. If a DMC render still crashes, check what else imports
+  TensorFlow, or pass `--set run.tensorboard=false`; `metrics.jsonl` and the PNG images are
+  written either way.
 
 ## Configuration
 
@@ -82,6 +87,7 @@ Each run writes to `runs/<suite>_<task>_s<seed>/`:
 |------|----------|
 | `events.out.tfevents.*` | TensorBoard: losses, KL, entropies, imagined returns, episode/eval returns, FPS, and `openl` images (rows: truth / model / error; the first 5 frames are reconstructions, the rest are open-loop predictions) |
 | `metrics.jsonl` | the same scalars, one JSON line per log step |
+| `openl/truth_model_error/*.png` | the open-loop prediction images as PNG files (always written) |
 | `config.json` | the resolved config |
 | `latest.pt` | full checkpoint (weights + optimizers + counters) used by `--resume` |
 | `weights_<step>.pt` | periodic weight snapshots |
