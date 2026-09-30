@@ -7,7 +7,7 @@ requires-python = "==3.12.*"
 
 dependencies = [
     "accelerate",
-    "gymnasium",
+    "gymnasium[classic-control]",
     "numpy>1.21.6",
     "pytest",
     "pytest-asyncio",
@@ -22,13 +22,29 @@ dependencies = [
     "dm_control",
     "tqdm>=4.68.3",
     "plotly>=6.9.0",
+    "ale-py>=0.10",
 ]
+
+[project.scripts]
+dreamer-train = "dreamer.train:main"
+dreamer-eval = "dreamer.evaluate:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: needs real environments (MuJoCo rendering, ALE)"]
+
+[tool.ruff]
+line-length = 100
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F401"]
