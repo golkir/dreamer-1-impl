@@ -19,7 +19,7 @@ class NormalHead(nn.Module):
         self.mlp = MLP(feat_dim, 1, units, layers, activation)
 
     def forward(self, feat: torch.Tensor) -> D.Normal:
-        return D.Normal(self.mlp(feat).squeeze(-1), 1.0)
+        return D.Normal(self.mlp(feat).squeeze(-1).float(), 1.0)
 
 
 class ContinueHead(nn.Module):
@@ -30,7 +30,7 @@ class ContinueHead(nn.Module):
         self.mlp = MLP(feat_dim, 1, units, layers, activation)
 
     def forward(self, feat: torch.Tensor) -> D.Bernoulli:
-        return D.Bernoulli(logits=self.mlp(feat).squeeze(-1))
+        return D.Bernoulli(logits=self.mlp(feat).squeeze(-1).float())
 
 
 class Actor(nn.Module):
@@ -59,7 +59,7 @@ class Actor(nn.Module):
         self.mean_scale = mean_scale
 
     def forward(self, feat: torch.Tensor) -> TanhNormal | OneHotDist:
-        x = self.mlp(feat)
+        x = self.mlp(feat).float()
         if self.discrete:
             return OneHotDist(x)
         mean, std = x.chunk(2, -1)

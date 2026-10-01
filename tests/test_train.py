@@ -105,7 +105,6 @@ print("ok")
     assert list(tmp_path.glob("events.out.tfevents.*"))
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize(
     "suite,task,discrete",
     [("dmc", "cartpole_balance", False), ("atari", "pong", True), ("gym", "Pendulum-v1", False)],

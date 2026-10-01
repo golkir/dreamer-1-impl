@@ -64,7 +64,10 @@ class Logger:
         self.scalars: dict[str, list[float]] = defaultdict(list)
 
     def scalar(self, name: str, value: float) -> None:
-        self.scalars[name].append(float(value))
+        value = float(value)
+        if name.endswith("grad_norm") and not np.isfinite(value):
+            return  # an fp16 overflow step, skipped by the loss scaler; not a divergence
+        self.scalars[name].append(value)
 
     def image(self, name: str, image: torch.Tensor, step: int) -> None:
         """Save a (C, H, W) image in [0, 1] as PNG, and to TensorBoard if enabled."""

@@ -41,7 +41,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: needs real environments (MuJoCo rendering, ALE)"]
+addopts = "-m 'not slow'"
+markers = ["slow: takes minutes (torch.compile); run with pytest -m slow"]
 
 [tool.ruff]
 line-length = 100

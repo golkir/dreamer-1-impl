@@ -107,3 +107,40 @@ def test_video_prediction_image(debug_config):
     rows = min(6, debug_config.train.batch_size)
     assert image.shape == (3, rows * 3 * 64, 8 * 64)
     assert 0 <= image.min() and image.max() <= 1
+
+
+def test_amp_train_step_and_checkpoint(debug_config):
+    torch.manual_seed(0)
+    debug_config.run.amp = True
+    agent = make_agent(debug_config, discrete=False)
+    batch = make_batch(agent, debug_config)
+    for _ in range(12):  # the loss scaler may skip a few overflowing steps at first
+        metrics = agent.train_step(batch)
+    losses = {k: v for k, v in metrics.items() if not k.endswith("grad_norm")}
+    assert all(np.isfinite(v) for v in losses.values()), losses
+    ckpt = agent.checkpoint()
+    assert ckpt["scalers"]["model"]["scale"] < 65536  # warm-up lowered the scale
+    clone = make_agent(debug_config, discrete=False)
+    clone.load_checkpoint(ckpt)
+    assert clone._scalers["model"].get_scale() == agent._scalers["model"].get_scale()
+
+
+def test_loads_checkpoint_without_scaler_state(debug_config):
+    agent = make_agent(debug_config, discrete=False)
+    ckpt = agent.checkpoint()
+    del ckpt["scalers"]  # checkpoints written before mixed precision existed
+    debug_config.run.amp = True
+    clone = make_agent(debug_config, discrete=False)
+    clone.load_checkpoint(ckpt)
+    assert np.isfinite(list(clone.train_step(make_batch(clone, debug_config)).values())[0])
+
+
+@pytest.mark.slow
+def test_compiled_train_step(debug_config):
+    torch.manual_seed(0)
+    debug_config.run.compile = True
+    agent = make_agent(debug_config, discrete=True)
+    metrics = agent.train_step(make_batch(agent, debug_config))
+    assert all(np.isfinite(v) for v in metrics.values()), metrics
+    action, _ = agent.policy(np.zeros(OBS_SHAPE, np.uint8), None, explore=False)
+    assert 0 <= action < 4

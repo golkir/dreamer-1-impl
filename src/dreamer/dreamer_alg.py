@@ -1,17 +1,6 @@
-"""
-Dreamer agent (Hafner et al., 2020, "Dream to Control: Learning Behaviors by
-Latent Imagination").
-
-One training step:
-  1. World model: encode a batch of replayed sequences, filter them with the RSSM
-     and maximize image and reward likelihood minus KL(posterior || prior).
-  2. Behavior: from every posterior state, imagine ``horizon`` steps ahead with the
-     actor. The actor maximizes lambda-returns by backpropagating through the
-     learned dynamics; the value net regresses those returns.
-"""
-
 from __future__ import annotations
 
+import contextlib
 import itertools
 
 import gymnasium as gym
@@ -28,6 +17,8 @@ from dreamer.replay_buffer import Batch
 from dreamer.utils import freeze, lambda_return
 
 PolicyState = tuple[State, torch.Tensor]  # (latent state, previous action)
+
+torch.distributions.Distribution.set_default_validate_args(False)
 
 
 class Dreamer(nn.Module):
@@ -86,11 +77,23 @@ class Dreamer(nn.Module):
         self.actor_opt = adam(self.actor.parameters(), t.actor_lr)
         self.value_opt = adam(self.value.parameters(), t.value_lr)
 
+        # Mixed precision: networks run in fp16, distributions and losses stay fp32.
+        # One loss scaler per optimizer, created on first use on the model's device.
+        self.amp = config.run.amp
+        self._scalers: dict[str, torch.amp.GradScaler] = {}
+
+        if config.run.compile:
+            # Fuse the many small ops of the per-step recurrences, which run 50 (observe)
+            # and 15 (imagine) times per update. Only functions are compiled, so
+            # parameter names and checkpoints are unchanged.
+            self.rssm.img_step = torch.compile(self.rssm.img_step)
+            self.rssm.obs_step = torch.compile(self.rssm.obs_step)
+            self.actor.mlp.compile()
+
     @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
-    # ------------------------------------------------------------------ training
 
     @staticmethod
     def preprocess(obs: torch.Tensor) -> torch.Tensor:
@@ -100,6 +103,26 @@ class Dreamer(nn.Module):
         if self.config.train.reward_transform == "tanh":
             return torch.tanh(reward)
         return reward
+
+    def _autocast(self):
+        if not self.amp:
+            return contextlib.nullcontext()
+        return torch.autocast(self.device.type, dtype=torch.float16)
+
+    def _optimize(
+        self, name: str, optimizer: torch.optim.Optimizer, loss: torch.Tensor, params
+    ) -> torch.Tensor:
+        """Backward, clip, step. Returns the gradient norm before clipping."""
+        if name not in self._scalers:
+            self._scalers[name] = torch.amp.GradScaler(self.device.type, enabled=self.amp)
+        scaler = self._scalers[name]
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        norm = nn.utils.clip_grad_norm_(params, self.config.train.grad_clip)
+        scaler.step(optimizer)  # skipped if the fp16 gradients overflowed
+        scaler.update()
+        return norm
 
     def train_step(self, batch: Batch) -> dict[str, float]:
         post, metrics = self.train_world_model(batch)
@@ -111,26 +134,24 @@ class Dreamer(nn.Module):
     def train_world_model(self, batch: Batch) -> tuple[State, dict[str, torch.Tensor]]:
         t = self.config.train
         obs = self.preprocess(batch.observation)
-        embed = self.encoder(obs)
-        post, prior = self.rssm.observe(embed, batch.action, batch.is_first)
-        feat = post.feat
+        with self._autocast():
+            embed = self.encoder(obs)
+            post, prior = self.rssm.observe(embed, batch.action, batch.is_first)
+            feat = post.feat
 
-        image_loss = -self.decoder(feat).log_prob(obs).mean()
-        reward_loss = -self.reward(feat).log_prob(self.transform_reward(batch.reward)).mean()
-        kl_loss, kl = self.rssm.kl_loss(post, prior, t.free_nats)
-        loss = t.kl_scale * kl_loss + image_loss + reward_loss
-        metrics = {}
-        if self.cont is not None:
-            cont_loss = -self.cont(feat).log_prob(1.0 - batch.is_terminal).mean()
-            loss = loss + t.continue_scale * cont_loss
-            metrics["continue_loss"] = cont_loss.detach()
+            image_loss = -self.decoder(feat).log_prob(obs).mean()
+            reward_loss = -self.reward(feat).log_prob(self.transform_reward(batch.reward)).mean()
+            kl_loss, kl = self.rssm.kl_loss(post, prior, t.free_nats)
+            loss = t.kl_scale * kl_loss + image_loss + reward_loss
+            metrics = {}
+            if self.cont is not None:
+                cont_loss = -self.cont(feat).log_prob(1.0 - batch.is_terminal).mean()
+                loss = loss + t.continue_scale * cont_loss
+                metrics["continue_loss"] = cont_loss.detach()
 
-        self.model_opt.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(
-            [p for mod in self.world_model for p in mod.parameters()], t.grad_clip
+        grad_norm = self._optimize(
+            "model", self.model_opt, loss, [p for mod in self.world_model for p in mod.parameters()]
         )
-        self.model_opt.step()
 
         metrics.update(
             model_loss=loss.detach(),
@@ -163,7 +184,7 @@ class Dreamer(nn.Module):
 
         # Gradients flow through the world model and value net into the actions,
         # but only the actor's parameters are updated here.
-        with freeze(self.world_model + [self.value]):
+        with freeze(self.world_model + [self.value]), self._autocast():
             states, entropy = self.imagine(start, t.horizon)
             feat = states.feat  # (H + 1, N, F)
             reward = self.reward(feat).mean
@@ -181,17 +202,12 @@ class Dreamer(nn.Module):
             if t.actor_entropy:
                 actor_loss = actor_loss - t.actor_entropy * (weights * entropy).mean()
 
-        self.actor_opt.zero_grad(set_to_none=True)
-        actor_loss.backward()
-        actor_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), t.grad_clip)
-        self.actor_opt.step()
+        actor_norm = self._optimize("actor", self.actor_opt, actor_loss, self.actor.parameters())
 
-        value_dist = self.value(feat[:-1].detach())
-        value_loss = -(weights * value_dist.log_prob(returns.detach())).mean()
-        self.value_opt.zero_grad(set_to_none=True)
-        value_loss.backward()
-        value_norm = nn.utils.clip_grad_norm_(self.value.parameters(), t.grad_clip)
-        self.value_opt.step()
+        with self._autocast():
+            value_dist = self.value(feat[:-1].detach())
+            value_loss = -(weights * value_dist.log_prob(returns.detach())).mean()
+        value_norm = self._optimize("value", self.value_opt, value_loss, self.value.parameters())
 
         return {
             "actor_loss": actor_loss.detach(),
@@ -283,6 +299,7 @@ class Dreamer(nn.Module):
             "model_opt": self.model_opt.state_dict(),
             "actor_opt": self.actor_opt.state_dict(),
             "value_opt": self.value_opt.state_dict(),
+            "scalers": {name: scaler.state_dict() for name, scaler in self._scalers.items()},
         }
 
     def load_checkpoint(self, ckpt: dict) -> None:
@@ -290,3 +307,7 @@ class Dreamer(nn.Module):
         self.model_opt.load_state_dict(ckpt["model_opt"])
         self.actor_opt.load_state_dict(ckpt["actor_opt"])
         self.value_opt.load_state_dict(ckpt["value_opt"])
+        for name, state in ckpt.get("scalers", {}).items():
+            if state:  # empty when the checkpoint was trained without amp
+                self._scalers[name] = torch.amp.GradScaler(self.device.type, enabled=self.amp)
+                self._scalers[name].load_state_dict(state)

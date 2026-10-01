@@ -84,13 +84,13 @@ class RSSM(nn.Module):
         )
 
     def _stats(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        mean, std = x.chunk(2, -1)
+        mean, std = x.float().chunk(2, -1)
         return mean, F.softplus(std) + self.min_std
 
     def img_step(self, prev: State, action: torch.Tensor) -> State:
         """Prior step: advance the state with an action, without an observation."""
         x = self.img_in(torch.cat([prev.stoch, action], -1))
-        deter = self.gru(x, prev.deter)
+        deter = self.gru(x, prev.deter).float()
         mean, std = self._stats(self.prior_net(deter))
         stoch = mean + std * torch.randn_like(std)
         return State(mean, std, stoch, deter)

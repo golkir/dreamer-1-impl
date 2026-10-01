@@ -8,7 +8,7 @@ DeepMind Control (from pixels), Atari and pixel-rendered Gymnasium environments.
 
 ```bash
 uv sync                                            # install (Python 3.12)
-uv run pytest                                      # tests, ~15 s on CPU
+uv run pytest                                      # tests, ~30 s on CPU (pytest -m slow: compile test)
 uv run dreamer-train --preset debug                # tiny end-to-end run on CPU, ~1 min
 ```
 
@@ -53,6 +53,26 @@ uv run dreamer-eval runs/dmc_walker_walk_s0 --episodes 10 --video walker.mp4
   TensorBoard's TensorFlow-free mode. If a DMC render still crashes, check what else imports
   TensorFlow, or pass `--set run.tensorboard=false`; `metrics.jsonl` and the PNG images are
   written either way.
+
+## Speed
+
+Measure where the time goes on your machine before a long run:
+
+```bash
+uv run python -m dreamer.benchmark --preset dmc --task walker_walk
+uv run python -m dreamer.benchmark --preset dmc --task walker_walk --set run.amp=true --set run.compile=true
+```
+
+It reports the time per gradient update (world model / behavior), the share of that time the
+GPU is actually busy, the cost of one environment step (simulation + rendering vs. policy),
+and the projected hours for the configured `train.steps`. Two opt-in speed options:
+
+- `--set run.amp=true`: fp16 mixed precision, for GPUs with fp16 tensor cores (T4, V100, ...).
+  Losses and distributions stay in fp32. Helps when the benchmark reports high GPU-busy.
+- `--set run.compile=true`: `torch.compile` for the per-step RSSM/actor recurrences. Helps when
+  the GPU is mostly idle waiting for Python. The first updates take a minute or two to compile.
+
+Both keep checkpoints compatible, so they can be switched on when resuming a run.
 
 ## Configuration
 

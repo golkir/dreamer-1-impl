@@ -32,5 +32,5 @@ class Decoder(nn.Module):
     def forward(self, feat: torch.Tensor) -> D.Distribution:
         batch_shape = feat.shape[:-1]
         x = self.fc(feat).reshape(-1, self.fc.out_features, 1, 1)
-        mean = self.deconv(x).reshape(*batch_shape, *self.obs_shape)
+        mean = self.deconv(x).reshape(*batch_shape, *self.obs_shape).float()
         return D.Independent(D.Normal(mean, 1.0), len(self.obs_shape))
