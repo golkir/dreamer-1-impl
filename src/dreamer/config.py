@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 import torch
 
 class Trajectory:
@@ -133,3 +133,23 @@ class DreamerConfig:
     compile: bool = False  # torch.compile the per-step RSSM/actor modules (GPU)
     log_dir: str = "runs/dreamer"
     checkpoint_dir: str = "checkpoints/dreamer"
+
+
+def config_from_dict(cls, values: dict):
+    """Rebuild a (nested) config dataclass from dataclasses.asdict output.
+
+    Unknown keys are ignored and missing ones keep their defaults, so configs
+    saved by older or newer code still load.
+    """
+    kwargs = {}
+    for f in fields(cls):
+        if f.name not in values:
+            continue
+        value = values[f.name]
+        default = f.default_factory() if callable(f.default_factory) else f.default
+        if is_dataclass(default):
+            value = config_from_dict(type(default), value)
+        elif isinstance(default, tuple):
+            value = tuple(value)
+        kwargs[f.name] = value
+    return cls(**kwargs)

@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 from dreamer.config import DreamerConfig
 from dreamer.envs import make_dmc_env
 from dreamer.dreamer_alg import Dreamer
+from dreamer.checkpoint import checkpoint_config, load_checkpoint, save_checkpoint
 
 
 def set_seed(seed: int) -> None:
@@ -54,11 +55,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_env_name(env_name: str) -> tuple[str, str]:
+    """walker_walk -> (walker, walk); ball_in_cup_catch -> (ball_in_cup, catch)"""
+    domain, task = env_name.split("_", 1)
+    if domain == "ball" and task.startswith("in_cup_"):
+        domain, task = "ball_in_cup", task[len("in_cup_") :]
+    return domain, task
+
+
 def apply_overrides(config: DreamerConfig, args: argparse.Namespace) -> DreamerConfig:
     if args.env_name is not None:
-        domain, task = args.env_name.split("_", 1)
-        if domain == "ball" and task.startswith("in_cup_"):  # ball_in_cup_catch
-            domain, task = "ball_in_cup", task[len("in_cup_") :]
+        domain, task = parse_env_name(args.env_name)
         config.environment.domain_name = domain
         config.environment.task_name = task
     if args.env_backend is not None:
@@ -77,31 +84,6 @@ def apply_overrides(config: DreamerConfig, args: argparse.Namespace) -> DreamerC
         config.checkpoint_dir = args.checkpoint_dir
     config.device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     return config
-
-
-def save_checkpoint(dreamer: Dreamer, iteration: int, path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(
-        {
-            "iteration": iteration,
-            "num_total_episode": dreamer.num_total_episode,
-            "model_state": dreamer.state_dict(),
-            "world_optimizer": dreamer.world_optimizer.state_dict(),
-            "actor_optimizer": dreamer.actor_optimizer.state_dict(),
-            "critic_optimizer": dreamer.critic_optimizer.state_dict(),
-        },
-        path,
-    )
-
-
-def load_checkpoint(dreamer: Dreamer, path: str, map_location="cpu") -> int:
-    ckpt = torch.load(path, map_location=map_location)
-    dreamer.load_state_dict(ckpt["model_state"])
-    dreamer.world_optimizer.load_state_dict(ckpt["world_optimizer"])
-    dreamer.actor_optimizer.load_state_dict(ckpt["actor_optimizer"])
-    dreamer.critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
-    dreamer.num_total_episode = ckpt.get("num_total_episode", 0)
-    return ckpt["iteration"]
 
 
 def main() -> None:
@@ -141,6 +123,16 @@ def main() -> None:
 
     start_iteration = 0
     if args.resume:
+        # older checkpoints don't store their config; they skip this check
+        saved = checkpoint_config(args.resume)
+        if saved is not None:
+            saved_env = f"{saved.environment.domain_name}_{saved.environment.task_name}"
+            env_name = f"{env_config.domain_name}_{env_config.task_name}"
+            if saved_env != env_name:
+                sys.exit(
+                    f"{args.resume} was trained on {saved_env}, not {env_name}; "
+                    f"pass --env-name {saved_env}"
+                )
         start_iteration = load_checkpoint(dreamer, args.resume, map_location=device) + 1
 
     writer = SummaryWriter(config.log_dir)

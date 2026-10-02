@@ -265,36 +265,44 @@ class Dreamer(nn.Module):
         }
 
     @torch.no_grad()
+    def policy(self, observation, state=None, explore=False):
+        """
+        One acting step: update the latent state with the new observation and pick an action.
+
+        state carries (posterior, h, previous action) between steps; pass None at the
+        start of an episode. Returns the action as a numpy array and the new state.
+        """
+        if state is None:
+            posterior, h = self.rssm.state_init(1)
+            action = torch.zeros(1, self.config.action_dim, device=self.device)
+        else:
+            posterior, h, action = state
+
+        embedded_observation = self.encoder(preprocess_obs(observation, self.device))
+        h = self.rssm.recurrent(posterior, action, h)
+        posterior, _ = self.rssm.observe(h, embedded_observation.reshape(1, -1))
+
+        action_dist, action = self.actor(h, posterior)
+        if explore:
+            # Gaussian exploration noise (Dreamer: 0.3)
+            action = action + self.config.expl_noise * torch.randn_like(action)
+            action = action.clamp(-1.0, 1.0)
+        else:
+            # the deterministic policy
+            action = torch.tanh(action_dist.base_dist.mean)
+
+        return action.cpu().numpy()[0], (posterior, h, action)
+
     def environment_interaction(self, env, num_interaction_episodes, train=True):
         score_lst = []
         for _epi in range(num_interaction_episodes):
-            posterior, h = self.rssm.state_init(1)
-            action = torch.zeros(1, self.config.action_dim, device=self.device)
-
             observation, _info = env.reset()
-
-            embedded_observation = self.encoder(
-                preprocess_obs(observation, self.device)
-            )
-
+            state = None
             score = 0.0
             done = False
 
             while not done:
-                h = self.rssm.recurrent(posterior, action, h)
-                embedded_observation = embedded_observation.reshape(1, -1)
-                posterior, _ = self.rssm.observe(h, embedded_observation)
-
-                action_dist, action = self.actor(h, posterior)
-                if train:
-                    # Gaussian exploration noise (Dreamer: 0.3)
-                    action = action + self.config.expl_noise * torch.randn_like(action)
-                    action = action.clamp(-1.0, 1.0)
-                else:
-                    # evaluate the deterministic policy
-                    action = torch.tanh(action_dist.base_dist.mean)
-
-                env_action = action.cpu().numpy()[0]
+                env_action, state = self.policy(observation, state, explore=train)
                 if hasattr(env, "action_space"):
                     env_action = np.clip(
                         env_action, env.action_space.low, env.action_space.high
@@ -310,9 +318,6 @@ class Dreamer(nn.Module):
                         observation, env_action, reward, next_observation, done, terminated
                     )
                 score += reward
-                embedded_observation = self.encoder(
-                    preprocess_obs(next_observation, self.device)
-                )
                 observation = next_observation
 
             if train:
