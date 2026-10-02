@@ -21,11 +21,14 @@ class Critic(nn.Module):
         self.z_dim = config.rssm.z_dim
         self.mlp = MLP(self.h_dim + self.z_dim, 1)
 
-    def compute_lambda_return(self, rewards, values, continues, lam=0.95):
-
+    def compute_lambda_return(self, rewards, values, discounts, lam=0.95):
         """
-        V_k = Sum(rewards_k_to_n) + lambda * v()
-        
+        TD(lambda) returns along an imagined trajectory (time on dim 1):
+
+            V_t = r_t + discount_t * ((1 - lambda) * v_{t+1} + lambda * V_{t+1})
+
+        bootstrapped with V_{H-1} = v_{H-1}. ``discounts`` is gamma times the
+        predicted continue probability. The last entry is only the bootstrap.
         """
 
         H = rewards.shape[1] - 1
@@ -33,9 +36,10 @@ class Critic(nn.Module):
         returns = torch.empty_like(rewards)
 
         ret = values[:, -1]
+        returns[:, -1] = ret
 
         for t in reversed(range(H)):
-            ret = rewards[:, t] + continues[:,t] * ((1.0 - lam) * values[:, t + 1] + lam * ret)
+            ret = rewards[:, t] + discounts[:, t] * ((1.0 - lam) * values[:, t + 1] + lam * ret)
             returns[:, t] = ret
 
         return returns

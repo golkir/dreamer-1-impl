@@ -8,8 +8,8 @@ class ReplayBatch:
     observation: torch.Tensor
     action: torch.Tensor
     reward: torch.Tensor
-    next_observation: torch.Tensor
-    done: torch.Tensor
+    done: torch.Tensor  # episode ended after this step (termination or time limit)
+    terminated: torch.Tensor  # episode ended by a true termination
 
 
 class ReplayBuffer:
@@ -32,7 +32,6 @@ class ReplayBuffer:
             (self.capacity, *observation_shape),
             dtype=state_dtype,
         )
-        self.next_observation = np.empty_like(self.observation)
 
         self.action = np.empty(
             (self.capacity, action_size),
@@ -48,9 +47,11 @@ class ReplayBuffer:
             (self.capacity, 1),
             dtype=np.float32,
         )
+        self.terminated = np.empty_like(self.done)
 
         self.buffer_index = 0
         self.full = False
+        self.pin_memory = torch.device(device).type == "cuda"
 
     def __len__(self):
         return self.capacity if self.full else self.buffer_index
@@ -62,14 +63,15 @@ class ReplayBuffer:
         reward: float,
         next_observation: np.ndarray,
         done: bool,
+        terminated: bool = False,
     ):
         idx = self.buffer_index
 
         self.observation[idx] = observation
         self.action[idx] = action
         self.reward[idx] = reward
-        self.next_observation[idx] = next_observation
         self.done[idx] = done
+        self.terminated[idx] = terminated
 
         self.buffer_index = (idx + 1) % self.capacity
         self.full |= self.buffer_index == 0
@@ -85,7 +87,6 @@ class ReplayBuffer:
             observation      (B, T, ...)
             action           (B, T, A)
             reward           (B, T, 1)
-            next_observation (B, T, ...)
             done             (B, T, 1)
 
         where
@@ -100,39 +101,31 @@ class ReplayBuffer:
                 last_start > 0
             ), "Not enough samples in replay buffer."
 
-        max_start = self.capacity if self.full else last_start
-
-        starts = np.random.randint(
-            0,
-            max_start,
-            size=(batch_size, 1),
-        )
+        if self.full:
+            # count from the oldest step so a chunk never runs from the newest
+            # data into the oldest across the write position
+            starts = self.buffer_index + np.random.randint(
+                0, self.capacity - chunk_size + 1, size=(batch_size, 1)
+            )
+        else:
+            starts = np.random.randint(0, last_start, size=(batch_size, 1))
 
         offsets = np.arange(chunk_size).reshape(1, -1)
 
         indices = (starts + offsets) % self.capacity
 
         return ReplayBatch(
-            observation=torch.as_tensor(
-                self.observation[indices],
-                device=self.device,
-                dtype=torch.float32,
-            ),
-            action=torch.as_tensor(
-                self.action[indices],
-                device=self.device,
-            ),
-            reward=torch.as_tensor(
-                self.reward[indices],
-                device=self.device,
-            ),
-            next_observation=torch.as_tensor(
-                self.next_observation[indices],
-                device=self.device,
-                dtype=torch.float32,
-            ),
-            done=torch.as_tensor(
-                self.done[indices],
-                device=self.device,
-            ),
+            observation=self._to_device(self.observation[indices]),
+            action=self._to_device(self.action[indices]),
+            reward=self._to_device(self.reward[indices]),
+            done=self._to_device(self.done[indices]),
+            terminated=self._to_device(self.terminated[indices]),
         )
+
+    def _to_device(self, array: np.ndarray) -> torch.Tensor:
+        # images stay uint8 until they reach the device: 4x less to copy,
+        # and the float conversion runs there (see preprocess_obs)
+        tensor = torch.from_numpy(array)
+        if self.pin_memory:
+            tensor = tensor.pin_memory()
+        return tensor.to(self.device, non_blocking=self.pin_memory)

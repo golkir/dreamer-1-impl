@@ -21,9 +21,6 @@ class Trajectory:
 
 @dataclass
 class RSSMTrajectory(Trajectory):
-    prior: list[torch.Tensor] = field(default_factory=list)
-    prior_mean: list[torch.Tensor] = field(default_factory=list)
-    prior_std: list[torch.Tensor] = field(default_factory=list)
     posterior: list[torch.Tensor] = field(default_factory=list)
     posterior_mean: list[torch.Tensor] = field(default_factory=list)
     posterior_std: list[torch.Tensor] = field(default_factory=list)
@@ -97,8 +94,8 @@ class DreamerConfig:
     action_repeat: int = 2
     observation_dim: int = 1024
     observation_shape: tuple = (3, 64, 64)
-    action_dim: int = 12
-    seq_length: int = 4
+    action_dim: int = 12  # overwritten in main.py from the environment's action space
+    seq_length: int = 50
     image_size: int = 64
 
     # model
@@ -108,7 +105,7 @@ class DreamerConfig:
     horizon: int = 15
 
     # optimization
-    replay_buffer_size: int = 100
+    replay_buffer_size: int = 1_000_000  # steps; main.py caps it at what the run can fill
     world_lr: float = 6e-4
     actor_lr: float = 8e-5
     critic_lr: float = 8e-5
@@ -117,11 +114,13 @@ class DreamerConfig:
     free_nats: float = 3.0  # KL free bits, prevents posterior collapse
     discount: float = 0.99
     lam: float = 0.95  # lambda for the lambda-return
+    expl_noise: float = 0.3  # std of Gaussian noise added to actions while collecting
 
     # training loop
-    seed_episodes: int = 1
-    num_iterations: int = 1000
-    batch_size: int = 5
+    seed_episodes: int = 5
+    num_iterations: int = 1000  # one iteration = train_steps updates + 1 episode
+    train_steps: int = 100  # gradient updates per iteration (Dreamer: 100 per episode)
+    batch_size: int = 50
     num_interaction_episodes: int = 1
     num_evaluate: int = 5
     eval_every: int = 10
@@ -130,6 +129,7 @@ class DreamerConfig:
     # misc
     seed: int = 0
     device: str = "cpu"
-    mixed_precision: str = "no"  # "no" | "fp16" | "bf16" -> passed to Accelerator
+    mixed_precision: str = "no"  # "no" | "fp16" | "bf16": autocast for the forward passes
+    compile: bool = False  # torch.compile the per-step RSSM/actor modules (GPU)
     log_dir: str = "runs/dreamer"
     checkpoint_dir: str = "checkpoints/dreamer"

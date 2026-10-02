@@ -67,6 +67,7 @@ class RSSM(nn.Module):
         return prior, prior_dist
 
     def state_init(self, B):
-        prior = torch.zeros(B, self.config.rssm.z_dim)
-        h = torch.zeros(B, self.config.rssm.h_dim)
+        device = self.linear.weight.device
+        prior = torch.zeros(B, self.config.rssm.z_dim, device=device)
+        h = torch.zeros(B, self.config.rssm.h_dim, device=device)
         return prior, h

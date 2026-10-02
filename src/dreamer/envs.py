@@ -8,14 +8,14 @@ Supports:
 Produces observations in the format expected by Dreamer:
 
     shape: (3, H, W)
-    dtype: float32
-    range: [-0.5, 0.5]
+    dtype: uint8
+    range: [0, 255]  (normalized to [-0.5, 0.5] by dreamer_alg.preprocess_obs)
 """
 
 
 import os 
 
-os.environ["MUJOCO_GL"] = "egl"
+os.environ.setdefault("MUJOCO_GL", "egl")  # e.g. MUJOCO_GL=osmesa to override
 import gymnasium as gym
 import numpy as np
 
@@ -35,8 +35,9 @@ class DMCEnv:
         width: int = 64,
         camera_id: int | None = None,
         action_repeat: int = 2,
+        seed: int | None = None,
     ):
-        self.env = suite.load(domain_name, task_name)
+        self.env = suite.load(domain_name, task_name, task_kwargs={"random": seed})
 
         self.height = height
         self.width = width
@@ -62,8 +63,7 @@ class DMCEnv:
             camera_id=self.camera_id,
         )
 
-        image = image.astype(np.float32) / 255.0 - 0.5
-        image = np.transpose(image, (2, 0, 1))
+        image = np.ascontiguousarray(np.transpose(image, (2, 0, 1)))
 
         return image
 
@@ -83,11 +83,15 @@ class DMCEnv:
 
         obs = self._render()
 
+        # DMC episodes end by time limit (truncation, discount stays 1); a zero
+        # discount marks a true termination.
+        terminated = ts.last() and ts.discount == 0.0
+        truncated = ts.last() and not terminated
         return (
             obs,
             reward,
-            ts.last(),
-            False,
+            terminated,
+            truncated,
             {},
         )
 
@@ -106,7 +110,6 @@ def make_dmc_env(
     frame_skip=2,
     pixel_norm=True,
 ):
-    del seed
     del visualize_reward
     del from_pixels
     del pixel_norm
@@ -117,4 +120,5 @@ def make_dmc_env(
         height=height,
         width=width,
         action_repeat=frame_skip,
+        seed=seed,
     )

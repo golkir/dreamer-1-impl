@@ -6,17 +6,11 @@ class MLP(nn.Module):
         super().__init__()
 
         layers = []
-        dims = (dim, *((hidden_size,) * (num_layers - 1)))
+        dims = (dim, *((hidden_size,) * num_layers))
 
-        for ind, (layer_dim_in, layer_dim_out) in enumerate(zip(dims[:-1], dims[1:])):
-            is_last = ind == (len(dims) - 1)
-
-            layers.extend(
-                [
-                    nn.Linear(layer_dim_in, layer_dim_out),
-                    nn.GELU() if not is_last else nn.Identity(),
-                ]
-            )
+        # num_layers hidden layers, then a linear output layer
+        for layer_dim_in, layer_dim_out in zip(dims[:-1], dims[1:]):
+            layers.extend([nn.Linear(layer_dim_in, layer_dim_out), nn.GELU()])
 
         self.net = nn.Sequential(*layers, nn.Linear(hidden_size, dim_out))
 

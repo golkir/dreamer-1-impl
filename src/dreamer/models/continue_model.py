@@ -13,5 +13,5 @@ class ContinueModel(nn.Module):
     def forward(self, posterior, h):
         x = torch.cat([posterior, h], dim=-1)
         x = self.mlp(x)
-        dist = torch.distributions.Bernoulli(logits=x)
+        dist = torch.distributions.Bernoulli(logits=x.float())
         return dist

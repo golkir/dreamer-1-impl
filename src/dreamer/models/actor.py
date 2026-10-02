@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn
 from torch.distributions import TanhTransform
@@ -36,7 +38,15 @@ class Actor(nn.Module):
         x = self.mlp(x)
 
         # assuming action is continuous, when discrete different logic
-        dist = create_normal_dist_from_output(x, activation=torch.tanh)
+        # Dreamer: mean = 5 * tanh(mean / 5), initial std 5; the tanh squashing of the
+        # action itself is done once, by TanhTransform below.
+        dist = create_normal_dist_from_output(
+            x,
+            mean_scale=5.0,
+            init_std=math.log(math.exp(5.0) - 1),
+            min_std=1e-4,
+            activation=torch.tanh,
+        )
 
         dist = torch.distributions.TransformedDistribution(dist, TanhTransform())
         action = torch.distributions.Independent(dist, 1).rsample()
